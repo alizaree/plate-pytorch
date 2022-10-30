@@ -419,16 +419,17 @@ class VideoFolder(torch.utils.data.Dataset):
             labels_tensor = torch.tensor(labels, dtype=torch.float32)
             
             
-        return frames, labels_tensor, labels_txt, frames_start, frames_end
+        return frames, labels_tensor, labels_txt, frames_start, frames_end, legal_range
 
     def __getitem__(self, index):
-        frames, labels, labels_txt, frames_start,frames_end = self.sample_single_allFrames(index)
+        frames, labels, labels_txt, frames_start,frames_end,legal_range = self.sample_single_allFrames(index)
         if self.args.model_type == 'model_T':
             global_img_tensors = frames[1:2]  # torch.Size([2, 3200])    
         else:
             global_img_tensors = frames  # torch.Size([2, 3200])
+        
 
-        return global_img_tensors, labels, labels_txt,  frames_start,frames_end
+        return global_img_tensors, labels, labels_txt,  frames_start,frames_end, legal_range
 
     def __len__(self):
         # return min(len(self.json_data), len(self.frame_cnts))
