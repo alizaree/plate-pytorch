@@ -10,9 +10,11 @@ import pickle
 import cv2
 import re
 import math
+import warnings
+import ffmpeg
 
 
-def read_assignment(index, vid_names, n_steps, constraints_path, L=3):
+def read_assignment(index, vid_names, n_steps, constraints_path,TasktoSteps=None, L=None):
     folder_id = vid_names[index]
     task = folder_id['task']
     path = os.path.join(constraints_path, folder_id['task'] + '_' + folder_id['vid'] + '.csv') # self
@@ -24,9 +26,15 @@ def read_assignment(index, vid_names, n_steps, constraints_path, L=3):
         base += v
     legal_range = []
     steps = []
+    if TasktoSteps is not None:
+        steps_txt=[]
+    else: 
+        steps_txt=None
     with open(path, 'r') as f:
         for line in f:
             step, start, end = line.strip().split(',')
+            if TasktoSteps is not None:
+                step_txt=TasktoSteps[task][int(step)-1]
             start = int(math.floor(float(start)))
             end = int(math.ceil(float(end)))
             step = int(step) - 1 + base
@@ -37,52 +45,62 @@ def read_assignment(index, vid_names, n_steps, constraints_path, L=3):
                 legal_range[-1] = (tmp[0], end)
             else:
                 steps.append(step)
+                if TasktoSteps is not None:
+                    steps_txt.append(step_txt)
                 legal_range.append((start, end))
     
-    if len(steps) < L:
-        return []            
+    if L is not None:
+        if len(steps) < L:
+            return []            
 
-    results = extract_steps(folder_id, steps, legal_range, L)
-    
+    results = extract_steps(folder_id, steps, legal_range, steps_txt=steps_txt, L=L)
+        
     return results
 
-def extract_steps(folder_id, steps, legal_range, L=3):
+def extract_steps(folder_id, steps, legal_range,steps_txt=None, L=None):
     N_steps = len(steps)
     results = []
-    
-    if N_steps < L:
-        # actually skipped
+    if L is not None:
+        if N_steps < L:
+            # actually skipped
+            res = {'folder_id': folder_id,
+                'legal_range': legal_range,
+                'labels': steps}
+            results.append(res)
+        else:
+            # Correct
+            for i in range(N_steps-L+1):
+                res = {'folder_id': folder_id,
+                    'legal_range': legal_range[i:i+L],
+                    'labels': steps[i:i+L],
+                    'labels_txt':steps_txt[i:i+L],
+                    }
+                results.append(res)
+            # # Wrong
+            # res = {'folder_id': folder_id,
+            #        'legal_range': legal_range[0:L],
+            #        'labels': [0]+steps[0:L]}
+            # results.append(res)
+
+
+            # Correct
+            #for i in range(1, N_steps-L+1):
+            #    res = {'folder_id': folder_id,
+            #           'legal_range': legal_range[i:i+L],
+            #           'labels': steps[(i-1):i+L]}
+            #    results.append(res)
+            # # randomly sample 1
+            # i = np.random.randint(1, N_steps-L+2)
+            # res = {'folder_id': folder_id,
+            #        'legal_range': legal_range[i:i+L],
+            #        'labels': steps[(i-1):i+L]}
+            # results.append(res)
+    else:
         res = {'folder_id': folder_id,
                'legal_range': legal_range,
-               'labels': steps}
+               'labels': steps,
+               'labels_txt':steps_txt}
         results.append(res)
-    else:
-        # Correct
-        for i in range(N_steps-L+1):
-            res = {'folder_id': folder_id,
-                   'legal_range': legal_range[i:i+L],
-                   'labels': steps[i:i+L]}
-            results.append(res)
-        # # Wrong
-        # res = {'folder_id': folder_id,
-        #        'legal_range': legal_range[0:L],
-        #        'labels': [0]+steps[0:L]}
-        # results.append(res)
-
-
-        # Correct
-        for i in range(1, N_steps-L+1):
-            res = {'folder_id': folder_id,
-                   'legal_range': legal_range[i:i+L],
-                   'labels': steps[(i-1):i+L]}
-            results.append(res)
-        # # randomly sample 1
-        # i = np.random.randint(1, N_steps-L+2)
-        # res = {'folder_id': folder_id,
-        #        'legal_range': legal_range[i:i+L],
-        #        'labels': steps[(i-1):i+L]}
-        # results.append(res)
-        
     return results
 
 def get_vids(path):
@@ -102,7 +120,7 @@ def read_task_info(path):
     steps = {}
     with open(path, 'r') as f:
         idx = f.readline()
-        while idx is not '':
+        while idx!='':
             idx = idx.strip()
             titles[idx] = f.readline().strip()
             urls[idx] = f.readline().strip()
@@ -132,7 +150,9 @@ class VideoFolder(torch.utils.data.Dataset):
                  if_augment=True,
                  max_sentence_length=None,
                  clean_inst=True,
-                 max_traj_len=10):
+                 max_traj_len=None,
+                 NumActionSteps=None,
+                 NumFramesAroundState=2):
         """
         :param root: data root path
         :param file_input: inputs path
@@ -143,6 +163,7 @@ class VideoFolder(torch.utils.data.Dataset):
         :param is_test: is_test flag
         :param k_split: number of splits of clips from the video
         :param sample_split: how many frames sub-sample from each clip
+        :NumActionSteps: if not Non returns all NumActionSteps sequential steps for each video as possible trejectories
         """
         self.in_duration = frames_duration
         self.coord_nr_frames = self.in_duration // 2
@@ -168,6 +189,7 @@ class VideoFolder(torch.utils.data.Dataset):
             video_csv_path = os.path.join(
                 root, 'crosstask_release', 'videos.csv')
             self.features_path = os.path.join(root, 'crosstask_features')
+            self.videos_path=[os.path.join(root,'crosstask_videos', 'videos'),os.path.join(root,'crosstask_videos', 'missing_videos')]
             # baseline
             self.constraints_path = os.path.join(
                 root, 'crosstask_release', 'annotations')
@@ -180,14 +202,17 @@ class VideoFolder(torch.utils.data.Dataset):
                 task_vids = {task: [vid for vid in vids if task not in val_vids or vid not in val_vids[task]] for
                              task, vids in
                              all_task_vids.items()}
+            #task_vids= {'task_id': ['video_ids']}
             primary_info = read_task_info(os.path.join(
                 root, 'crosstask_release', 'tasks_primary.txt'))
             test_tasks = set(primary_info['steps'].keys())
+            self.TasktoTitle=primary_info['title']
+            self.TasktoSteps=primary_info['steps']
 
-            self.n_steps = primary_info['n_steps']
-            all_tasks = set(self.n_steps.keys())
+            self.n_steps = primary_info['n_steps'] #{task_id: len_steps} for primary tasks
+            all_tasks = set(self.n_steps.keys()) #{task_id}
             task_vids = {task: vids for task,
-                         vids in task_vids.items() if task in all_tasks}
+                         vids in task_vids.items() if task in all_tasks} #only keep primary tasks
 
             cross_task_data_name = 'cross_task_data_{}.json'.format(is_val)
             if os.path.exists(cross_task_data_name):
@@ -199,12 +224,24 @@ class VideoFolder(torch.utils.data.Dataset):
                 for task, vids in task_vids.items():
                     all_vids.extend([(task, vid) for vid in vids])
                 json_data = []
+                iid=0
                 for idx in range(len(all_vids)):
                     task, vid = all_vids[idx]
                     video_path = os.path.join(
                         self.features_path, str(vid)+'.npy')
-                    json_data.append({'id': {'vid': vid, 'task': task, 'feature': video_path, 'bbox': ''},
-                                      'instruction_len': self.n_steps[task]})
+                    vp1=os.path.join(self.videos_path[0], str(vid)+'.mp4')
+                    vp2=os.path.join(self.videos_path[1], str(vid)+'.mp4')
+                    iid+=1
+                    if os.path.isfile(vp1):
+                        VidPath= vp1
+                    elif os.path.isfile(vp2):
+                        VidPath= vp2
+                    else:
+                        warnings.warn("Skipping missing video: "+ str(vid))
+                        continue
+                    json_data.append({'id': {'vid': vid, 'task': task, 'feature': video_path, 'vidPath': VidPath,
+                                             'bbox': ''},'instruction_len': self.n_steps[task]})
+                print('Number of missing videos',iid-len(json_data))
                 print('All primary task videos: {}'.format(len(json_data)))
                 self.json_data = json_data
                 with open('cross_task_data.json', 'w') as f:
@@ -217,13 +254,14 @@ class VideoFolder(torch.utils.data.Dataset):
         self.prepare_data()
         # boxes_path = args.tracked_boxes
         # self.box_annotations = []
-        self.M = 2
+        self.M = NumFramesAroundState
         print('... Loading box annotations might take a minute ...')
 
         # NEW
         self.step_data = []
         for i in range(len(self.vid_names)):
-            self.step_data += read_assignment(i, self.vid_names, self.n_steps, self.constraints_path, 3)
+            self.step_data += read_assignment(i, self.vid_names, self.n_steps, self.constraints_path,
+                                              TasktoSteps=self.TasktoSteps, L=NumActionSteps)
         print('length of step data: {}'.format(len(self.step_data)))
 
     def prepare_data(self):
@@ -267,6 +305,7 @@ class VideoFolder(torch.utils.data.Dataset):
         
         step_data = self.step_data[index]
         folder_id = step_data['folder_id']
+        
         images = np.load(os.path.join(
             self.features_path, folder_id['vid']+'.npy'))[:, :1024]  # (179, 3200) 
         legal_range = [(start_idx, end_idx) for (
@@ -275,19 +314,18 @@ class VideoFolder(torch.utils.data.Dataset):
 
         if self.args.model_type == 'woT':
             images_start, images_end = self.curate_dataset(
-                images, legal_range, M=self.M)
-
-            frames = []
-            # start state
+                images, legal_range, M=self.M) # start state
+            
             # correct
-            for i in range(self.args.max_traj_len):
-                frames.extend(
-                    images_start[min(i, len(images_start) - 1)])  # goal
-            # # wrong
-            # for i in range(self.args.max_traj_len-1):
-            #     frames.extend(
-            #         images_start[min(i, len(images_start) - 1)])  # goal
-            # end state
+            IterLen=self.max_traj_len if self.max_traj_len is not None else len(images_start)
+            frames = []
+            for i in range(IterLen):
+                frames.extend(images_start[min(i, len(images_start) - 1)])  # goal
+                # # wrong
+                # for i in range(self.args.max_traj_len-1):
+                #     frames.extend(
+                #         images_start[min(i, len(images_start) - 1)])  # goal
+                # end state
             frames.extend(images_end[min(i, len(images_end) - 1)])
             frames = torch.tensor(frames)
 
@@ -295,7 +333,7 @@ class VideoFolder(torch.utils.data.Dataset):
             labels = []
             labels_data = step_data['labels']
             # Correct
-            for i in range(self.args.max_traj_len):
+            for i in range(IterLen):
                 if i < len(labels_data):
                     labels.append([labels_data[i]])
                 else:
@@ -309,16 +347,88 @@ class VideoFolder(torch.utils.data.Dataset):
             labels_tensor = torch.tensor(labels, dtype=torch.float32)
             
         return frames, labels_tensor
+    
+    def ReadVideo(self,vidp):
+        probe = ffmpeg.probe(vidp)
+        video_stream = next((stream for stream in probe['streams'] if stream['codec_type'] == 'video'), None)
+        width = int(video_stream['width'])
+        height = int(video_stream['height'])
+        out, _ = (
+            ffmpeg
+            .input(vidp)
+            .output('pipe:', format='rawvideo', pix_fmt='rgb24',r=1)
+            .run(capture_stdout=True)
+        )
+        video = (
+            np
+            .frombuffer(out, np.uint8)
+            .reshape([-1, height, width, 3])
+        )
+        return video[1:, :,:,:]
+    
+    def sample_single_allFrames(self, index):
+        """
+        Choose and Load frames per video
+        :param index:
+        :return:
+        """
+        
+        step_data = self.step_data[index]
+        folder_id = step_data['folder_id']
+        # read frames instead of features
+        frame_paths=folder_id['vidPath']
+        
+        images = self.ReadVideo(frame_paths)  # (T,H,W,C=3)  #sample rate=1
+        legal_range = [(start_idx, end_idx) for (
+            start_idx, end_idx) in step_data['legal_range'] if end_idx < images.shape[0]+1]
+        # labels = step_data['labels']
+
+        if self.args.model_type == 'woT':
+            images_start, images_end = self.curate_dataset(
+                images, legal_range, M=self.M) # start state
+            IterLen=self.max_traj_len if self.max_traj_len is not None else len(images_start)
+
+            frames = torch.tensor(images)
+            frames_start=torch.tensor(images_start)
+            frames_end=torch.tensor(images_end)
+
+            # labels
+            labels = []
+            labels_data = step_data['labels']
+            # Correct
+            for i in range(IterLen):
+                if i < len(labels_data):
+                    labels.append([labels_data[i]])
+                else:
+                    labels.append([0])
+                    
+            labels_txt = []
+            labels_txt_data = step_data['labels_txt']
+            for i in range(IterLen):
+                if i < len(labels_txt_data):
+                    labels_txt.append([labels_txt_data[i]])
+                else:
+                    labels_txt.append([''])       
+                
+            # # Wrong
+            # for i in range(self.args.max_traj_len+1):
+            #     if i < len(labels_data):
+            #         labels.append([labels_data[i]])
+            #     else:
+            #         labels.append([0])
+            labels_tensor = torch.tensor(labels, dtype=torch.float32)
+            
+            
+        return frames, labels_tensor, labels_txt, frames_start, frames_end
 
     def __getitem__(self, index):
-        frames, labels = self.sample_single(
-            index)
+        frames, labels, labels_txt, frames_start,frames_end = self.sample_single_allFrames(index)
         if self.args.model_type == 'model_T':
             global_img_tensors = frames[1:2]  # torch.Size([2, 3200])    
         else:
             global_img_tensors = frames  # torch.Size([2, 3200])
 
-        return global_img_tensors, labels
+        return global_img_tensors, labels, labels_txt,  frames_start,frames_end
 
     def __len__(self):
         # return min(len(self.json_data), len(self.frame_cnts))

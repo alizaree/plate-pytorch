@@ -128,7 +128,8 @@ def main():
     global args, best_loss, best_top1_acc, best_inst_acc, best_success_rate, best_miou
     args = parser.parse_args()
     # create model
-    args.root_frames = './crosstask/'
+    if args.root_frames=='':
+        args.root_frames = './crosstask/'
     # args.root_frames = '../../crosstask/crosstask_features'
     args.max_traj_len = MAX_TRAJ_LEN
     args.num_classes = 133  # max_n_step = 11, sum 133
