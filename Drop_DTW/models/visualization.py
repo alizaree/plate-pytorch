@@ -65,6 +65,60 @@ def visualize_drop_dtw_matching(samples, distractor=None, gamma_f=10, drop_cost=
     return img, frame_labels, gt_labels
 
 
+
+
+def visualize_drop_dtw_matching_new(samples, distractor=None, gamma_f=10, drop_cost='logit', keep_percentile=0.3, shape=(10, 2), figsize=(10,5)):
+    gamma_f = [gamma_f] * len(samples) if not isinstance(gamma_f, (list, tuple)) else gamma_f
+    #plt.rcParams["figure.figsize"] = (shape[0], shape[1] * len(samples))
+    plt.figure(figsize=figsize)
+    for iddSample, sample in enumerate(samples):
+        #ax = plt.subplot(len(samples), 1, i + 1)
+        #ax.set_title(f"{sample_name}: drop-dtw matching, gamma {gamma_f[i]}")
+        frame_features = sample['frame_features']
+        step_features = sample['step_features']
+        zx_costs, drop_costs, _ = compute_all_costs(
+            sample, distractor, gamma_f[iddSample], drop_cost_type=drop_cost, keep_percentile=keep_percentile)
+        zx_costs, drop_costs = [t.detach().cpu().numpy() for t in [zx_costs, drop_costs]]
+
+        min_cost, path, frames_dropped = drop_dtw(zx_costs, drop_costs)
+        frame_labels = np.zeros_like(drop_costs) - 1
+        for label, frame_id in path:
+            if frame_id * label > 0 and frame_id not in frames_dropped:
+                
+                frame_labels[frame_id - 1] = sample['step_ids'][label - 1].item()
+            
+        gt_labels = np.zeros_like(frame_labels) - 1
+        for i in range(gt_labels.shape[0]):
+            for sample_id, start, end in zip(sample['step_ids'], sample['step_starts'], sample['step_ends']):
+                if (i >= start.item()) and (i <= end.item()):
+                    gt_labels[i] = sample_id.item()
+        unique_labels = np.unique(sample['step_ids'].numpy())
+        step_colors = dict(zip(unique_labels, color_code))
+        step_shapes = dict(zip(unique_labels, shape_code))
+
+        '''tick_freq = 20 if len(frame_labels) > 100 else 10
+        plt.xticks(np.arange(0, len(frame_labels) * 3.2, tick_freq))
+        plt.xlim(0, len(frame_labels) * 3.2)
+        plt.tick_params(bottom=True, top=False, left=True, right=True, labelright=True)
+        plt.grid()
+        '''
+        added_step_ids = []
+        for si, step_id in enumerate(unique_labels):
+            gt_x = np.arange(len(gt_labels))[gt_labels == step_id]
+            pred_x = np.arange(len(frame_labels))[frame_labels == step_id]
+            step_color, step_shape = step_colors[step_id], step_shapes[step_id]
+            #plt.plot(gt_x , [iddSample] * len(gt_x), step_shape, color=step_color)
+            plt.plot(pred_x , [iddSample] * len(pred_x), step_shape, color=step_color)
+            plt.fill_between(gt_x , [iddSample- 0.3] * len(gt_x) , [iddSample+ 0.3] * len(gt_x) , alpha=0.2, color=step_color)
+    #plt.legend()
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png')
+    #plt.close()
+    buf.seek(0)
+    img = np.array(Image.open(buf).convert('RGB'))
+    return img, frame_labels, gt_labels
+
+
 def visualize_step_strength(samples, distractor=None, gamma_f=10, drop_cost='logit', keep_percentile=0.3, shape=(10, 2)):
     gamma_f = [gamma_f] * len(samples) if not isinstance(gamma_f, (list, tuple)) else gamma_f
     step_ids = list(samples.values())[0]['step_ids']
